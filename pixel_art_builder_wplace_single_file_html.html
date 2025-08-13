@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pixel Art Builder</title>
+  <style>
+    :root { --gap: 12px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: #111; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    .wrap { display: grid; grid-template-columns: 360px 1fr; gap: 24px; align-items: start; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,.04); }
+    label { display: block; font-size: 12px; color: #555; margin-bottom: 6px; }
+    input[type="number"], input[type="file"] { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 8px; }
+    button { padding: 10px 14px; border: 1px solid #111; border-radius: 10px; background: #111; color: #fff; cursor: pointer; }
+    button.secondary { background: #fff; color: #111; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+    .mt { margin-top: var(--gap); }
+    .small { font-size: 12px; color: #666; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    textarea { width: 100%; min-height: 140px; resize: vertical; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    canvas { image-rendering: pixelated; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap); }
+    .pill { display: inline-block; padding: 3px 8px; border: 1px solid #e5e7eb; border-radius: 999px; font-size: 12px; }
+    .muted { color: #6b7280; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <h1>Pixel Art Builder – PNG ➜ Script (index & hex)</h1>
+  <p class="small">Fichier HTML autonome. Dépose un PNG/JPG ➜ choisis une taille et un nombre de couleurs ➜ exporte JSON/JS.
+  Aucun package requis.</p>
+
+  <div class="wrap">
+    <div class="card">
+      <div>
+        <label>Image source (PNG/JPG)</label>
+        <input id="file" type="file" accept="image/png,image/jpeg" />
+      </div>
+      <div class="row mt">
+        <div>
+          <label>Largeur cible (px)</label>
+          <input id="w" type="number" min="2" max="256" value="32" />
+        </div>
+        <div>
+          <label>Hauteur cible (px)</label>
+          <input id="h" type="number" min="2" max="256" value="32" />
+        </div>
+      </div>
+      <div class="row mt">
+        <div>
+          <label>Nombre de couleurs (palette)</label>
+          <input id="k" type="number" min="2" max="64" value="16" />
+        </div>
+        <div style="align-self:end;">
+          <button id="run">Convertir</button>
+        </div>
+      </div>
+      <p class="small mt">Astuce : réduis la taille (ex. 32×32/48×48) pour un rendu "pixel art". Le lissage est désactivé.</p>
+      <div id="meta" class="mt small muted"></div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div>
+          <label>Aperçu (x8)</label>
+          <canvas id="preview" width="256" height="256"></canvas>
+        </div>
+        <div>
+          <label>Index (matrice JSON)</label>
+          <textarea id="outIdx" readonly></textarea>
+          <div class="row mt">
+            <button class="secondary" data-copy="#outIdx">Copier</button>
+            <button class="secondary" id="dlJs">Télécharger JS</button>
+          </div>
+        </div>
+        <div>
+          <label>Palette (index ➜ hex)</label>
+          <textarea id="outPal" readonly></textarea>
+          <div class="row mt">
+            <button class="secondary" data-copy="#outPal">Copier</button>
+            <span id="palSize" class="pill muted"></span>
+          </div>
+        </div>
+      </div>
+      <div class="mt">
+        <label>Hex (matrice JSON)</label>
+        <textarea id="outHex" readonly class="mono"></textarea>
+        <button class="secondary mt" data-copy="#outHex">Copier</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Canvases techniques -->
+  <canvas id="work" class="hidden"></canvas>
+
+<script>
+// Utils ---------------------------------------------------------
+const $ = sel => document.querySelector(sel);
+const toHex = (r,g,b) => '#' + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join('');
+function copyFrom(selector){
+  const el = $(selector); el.select(); document.execCommand('copy');
+}
+
+document.addEventListener('click', (e)=>{
+  const t = e.target.closest('[data-copy]');
+  if(!t) return; copyFrom(t.getAttribute('data-copy'));
+  t.textContent = 'Copié'; setTimeout(()=> t.textContent='Copier', 900);
+});
+
+// K-means simple pour quantification palette -------------------
+function kmeansRGB(points, k, maxIter=12){
+  // points: [[r,g,b], ...]
+  // init: échantillon aléatoire unique
+  const uniq = []; const seen = new Set();
+  for(const p of points){
+    const key = p.join(','); if(!seen.has(key)){ seen.add(key); uniq.push(p); }
+    if(uniq.length >= k) break;
+  }
+  while(uniq.length < k) uniq.push(points[Math.floor(Math.random()*points.length)]);
+  let centers = uniq.map(p => p.slice());
+  let labels = new Array(points.length).fill(0);
+
+  for(let it=0; it<maxIter; it++){
+    // assign
+    for(let i=0;i<points.length;i++){
+      let best=0, bestD=Infinity; const [r,g,b]=points[i];
+      for(let c=0;c<k;c++){
+        const [cr,cg,cb]=centers[c];
+        const d=(r-cr)*(r-cr)+(g-cg)*(g-cg)+(b-cb)*(b-cb);
+        if(d<bestD){bestD=d; best=c;}
+      }
+      labels[i]=best;
+    }
+    // recompute
+    const sum = Array.from({length:k},()=>[0,0,0,0]);
+    for(let i=0;i<points.length;i++){
+      const c=labels[i]; const p=points[i];
+      sum[c][0]+=p[0]; sum[c][1]+=p[1]; sum[c][2]+=p[2]; sum[c][3]++;
+    }
+    const newCenters = centers.map((c,ci)=>{
+      const n=sum[ci][3]||1; return [
+        Math.round(sum[ci][0]/n)||c[0],
+        Math.round(sum[ci][1]/n)||c[1],
+        Math.round(sum[ci][2]/n)||c[2]
+      ];
+    });
+    // convergence brute
+    let moved=false; for(let i=0;i<k;i++){
+      if(newCenters[i][0]!==centers[i][0]||newCenters[i][1]!==centers[i][1]||newCenters[i][2]!==centers[i][2]){ moved=true; break; }
+    }
+    centers=newCenters; if(!moved) break;
+  }
+  return {centers, labels};
+}
+
+// Pipeline ------------------------------------------------------
+const fileInput = $('#file');
+$('#run').addEventListener('click', async()=>{
+  const f = fileInput.files && fileInput.files[0];
+  if(!f){ alert('Choisis un fichier image.'); return; }
+  const W = Math.max(2, Math.min(256, +$('#w').value||32));
+  const H = Math.max(2, Math.min(256, +$('#h').value||32));
+  const K = Math.max(2, Math.min(64, +$('#k').value||16));
+
+  const img = new Image();
+  img.src = URL.createObjectURL(f);
+  await img.decode();
+
+  const work = $('#work');
+  const ctx = work.getContext('2d');
+  ctx.imageSmoothingEnabled = false; // nearest-neighbor
+  work.width = W; work.height = H;
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(img, 0,0, W,H);
+
+  const data = ctx.getImageData(0,0,W,H).data; // RGBA flat
+  const rgb = []; rgb.length = W*H;
+  for(let i=0,j=0;i<data.length;i+=4,j++){
+    rgb[j] = [data[i], data[i+1], data[i+2]]; // ignore alpha
+  }
+
+  const { centers, labels } = kmeansRGB(rgb, K);
+  // mapping palette -> hex
+  const paletteHex = centers.map(c => toHex(c[0],c[1],c[2]));
+
+  // matrice index
+  const idx = []; let p=0;
+  for(let y=0;y<H;y++){
+    const row = new Array(W);
+    for(let x=0;x<W;x++,p++) row[x] = labels[p];
+    idx.push(row);
+  }
+  // matrice hex
+  const hex = idx.map(row => row.map(i => paletteHex[i]));
+
+  // sorties texte
+  $('#outIdx').value = JSON.stringify(idx);
+  $('#outPal').value = JSON.stringify(Object.fromEntries(paletteHex.map((h,i)=>[i,h])));
+  $('#outHex').value = JSON.stringify(hex);
+  $('#palSize').textContent = `${paletteHex.length} couleurs`;
+  $('#meta').textContent = `Taille: ${W}×${H} • Palette: ${K} couleurs`;
+
+  // aperçu grossi x8
+  const scale = 8; const pv = $('#preview');
+  pv.width = W*scale; pv.height = H*scale;
+  const pvx = pv.getContext('2d');
+  pvx.imageSmoothingEnabled = false;
+  // dessiner via ré-échantillon nearest en canvas intermédiaire
+  const tmp = document.createElement('canvas');
+  tmp.width=W; tmp.height=H; tmp.getContext('2d').putImageData(ctx.getImageData(0,0,W,H),0,0);
+  pvx.clearRect(0,0,pv.width,pv.height);
+  pvx.drawImage(tmp, 0,0, pv.width, pv.height);
+});
+
+// Export JS prêt à coller --------------------------------------
+$('#dlJs').addEventListener('click', ()=>{
+  const idx = $('#outIdx').value.trim();
+  const pal = $('#outPal').value.trim();
+  if(!idx || !pal){ alert('Génère d’abord les données.'); return; }
+  const js = `// Généré par Pixel Art Builder\nexport const PALETTE = ${pal};\nexport const PIXELS = ${idx};\n\n// Exemple Canvas:\n// const size=8; for(let y=0;y<PIXELS.length;y++){ for(let x=0;x<PIXELS[0].length;x++){ ctx.fillStyle = PALETTE[PIXELS[y][x]]; ctx.fillRect(x*size,y*size,size,size); } }\n`;
+  const blob = new Blob([js], {type: 'text/javascript'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'pixel_art.js';
+  document.body.appendChild(a); a.click(); a.remove();
+});
+</script>
+</body>
+</html>
